@@ -296,11 +296,15 @@
 // ============== SUPABASE & AUTHENTICATION SETUP ==================
 // =================================================================
 
-// !!!!!! สำคัญมาก: กรอกข้อมูล Supabase ของคุณตรงนี้ !!!!!!
-const SUPABASE_URL = 'https://roesxdbwekdmskmvwwks.supabase.co'; // เอามาจากหน้า Settings > API
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJvZXN4ZGJ3ZWtkbXNrbXZ3d2tzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg2ODMyODQsImV4cCI6MjA3NDI1OTI4NH0.PqKTpWmlZt1-VomlzQRJn8YxMF6hec3uYykbUodBb90'; // เอามาจากหน้า Settings > API
+// นี่คือ URL และ Key ของคุณที่ให้มา
+const SUPABASE_URL = 'https://roesxdbwekdmskmvwwks.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJvZXN4ZGJ3ZWtkbXNrbXZ3d2tzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg2ODMyODQsImV4cCI6MjA3NDI1OTI4NH0.PqKTpWmlZt1-VomlzQRJn8YxMF6hec3uYykbUodBb90';
 
-const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// --- (START) โค้ดส่วนที่แก้ไข ---
+// เราจะสร้าง client instance ด้วยชื่อใหม่ เพื่อไม่ให้ซ้ำกับ library หลัก
+const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// --- (END) โค้ดส่วนที่แก้ไข ---
+
 
 // Global state variables
 let state = { settings: {}, jobs: [] };
@@ -314,9 +318,6 @@ let realtimeChannel = null;
 // =================================================================
 // =================== CORE APPLICATION LOGIC ======================
 // =================================================================
-
-// The rest of your application code from the original file goes here.
-// I have adapted it below to work with Supabase.
 
 const defaultModel = () => ({
   settings:{
@@ -345,10 +346,9 @@ const defaultModel = () => ({
 async function loadInitialData() {
     console.log("Fetching data from Supabase...");
     try {
-        // ดึงข้อมูล settings และ jobs พร้อมกัน
         const [settingsRes, jobsRes] = await Promise.all([
-            supabase.from('settings').select('config_data').eq('id', 1).single(),
-            supabase.from('jobs').select('*').order('order_index') // เรียงตามลำดับที่จัดไว้
+            supabaseClient.from('settings').select('config_data').eq('id', 1).single(),
+            supabaseClient.from('jobs').select('*').order('order_index')
         ]);
 
         if (settingsRes.error) throw settingsRes.error;
@@ -357,7 +357,7 @@ async function loadInitialData() {
         if (!settingsRes.data) {
             console.warn("No settings found in DB, using default model.");
             state.settings = defaultModel().settings;
-            await saveAppSettings(state.settings); // บันทึก default กลับไปที่ DB
+            await saveAppSettings(state.settings);
         } else {
             state.settings = settingsRes.data.config_data;
         }
@@ -367,7 +367,6 @@ async function loadInitialData() {
         console.log("Data loaded successfully.");
         ensureDeptBaseline(state);
         
-        // หลังจากโหลดข้อมูลเสร็จ ก็ render หน้าจอ
         renderAll();
         show(currentView || 'dash');
 
@@ -384,7 +383,7 @@ async function saveAppSettings(settingsObject) {
       console.warn("Permission denied: User is not a manager.");
       return;
     }
-    const { error } = await supabase
+    const { error } = await supabaseClient
         .from('settings')
         .update({ config_data: settingsObject })
         .eq('id', 1);
@@ -408,7 +407,7 @@ async function saveJob(jobObject) {
         order_index: orderIndex !== -1 ? orderIndex : state.jobs.length,
     };
 
-    const { error } = await supabase.from('jobs').upsert(jobDataToSave);
+    const { error } = await supabaseClient.from('jobs').upsert(jobDataToSave);
     if (error) {
         console.error('Error saving job:', error);
         alert('เกิดข้อผิดพลาดในการบันทึกใบงาน: ' + error.message);
@@ -416,7 +415,7 @@ async function saveJob(jobObject) {
 }
 
 async function deleteJobsByIds(jobIds) {
-    const { error } = await supabase.from('jobs').delete().in('id', jobIds);
+    const { error } = await supabaseClient.from('jobs').delete().in('id', jobIds);
      if (error) {
         console.error('Error deleting multiple jobs:', error);
         alert('เกิดข้อผิดพลาดในการลบใบงาน');
@@ -429,7 +428,7 @@ async function saveJobOrder() {
         order_index: index
     }));
 
-    const { error } = await supabase.from('jobs').upsert(updates);
+    const { error } = await supabaseClient.from('jobs').upsert(updates);
     if (error) {
         console.error('Error saving job order:', error);
         alert('เกิดข้อผิดพลาดในการบันทึกลำดับ');
@@ -438,11 +437,9 @@ async function saveJobOrder() {
 
 function subscribeToChanges() {
     console.log("Subscribing to real-time changes...");
-    const channel = supabase.channel('public_db_changes')
+    const channel = supabaseClient.channel('public_db_changes')
       .on('postgres_changes', { event: '*', schema: 'public' }, (payload) => {
         console.log('Change received!', payload);
-        // A simple but effective way to handle changes: just reload all data.
-        // For more complex apps, you might update the state locally based on the payload.
         loadInitialData();
       })
       .subscribe();
@@ -451,7 +448,7 @@ function subscribeToChanges() {
 
 function unsubscribeFromChanges() {
     if (realtimeChannel) {
-        supabase.removeChannel(realtimeChannel);
+        supabaseClient.removeChannel(realtimeChannel);
         realtimeChannel = null;
         console.log("Unsubscribed from real-time changes.");
     }
@@ -478,7 +475,6 @@ function setExpanded(dept, jobId, val){ (ui.expand[dept] || (ui.expand[dept] = {
 function renderHeader() {
     if (!userProfile) return;
     el('#userName').textContent = userProfile.full_name || 'No Name';
-    // Hide settings if not a manager
     const isManager = userProfile.role === 'manager' || userProfile.role === 'admin';
     el('#btnSettings').style.display = isManager ? '' : 'none';
 }
@@ -529,7 +525,7 @@ async function addJob(){
   const qty = {}; state.settings.departments.forEach(d=> qty[d] = Number(el('#q_'+d)?.value || 0));
   
   const newJob = createJobObject({date, name, cut, qty});
-  state.jobs.push(newJob); // Optimistic update
+  state.jobs.push(newJob);
   await saveJob(newJob);
   
   renderAll(); clearForm();
@@ -551,7 +547,7 @@ async function saveJobEdit(){
     }
   });
   
-  await saveJob(j); // Save to Supabase
+  await saveJob(j);
   renderAll(); clearForm();
   show('jobs'); renderJobs();
 }
@@ -585,8 +581,7 @@ function renderJobs(){
       bEdit.onclick=()=>{ editingJobId=j.id; fillForm(j); el('#btnAddJob').style.display='none'; el('#btnSaveJob').style.display=''; el('#btnCancelEdit').style.display=''; show('form'); };
       bDel.onclick= async ()=>{ 
           if(!confirm('ลบใบงานนี้?')) return; 
-          await deleteJobsByIds([j.id]); 
-          // Real-time will handle the update
+          await deleteJobsByIds([j.id]);
       };
       tdAct.append(bEdit,' ',bDel);
       tbody.appendChild(tr);
@@ -631,7 +626,6 @@ function setupMultiSelectListeners() {
         
         const idsToDelete = Array.from(selected).map(cb => cb.dataset.id);
         await deleteJobsByIds(idsToDelete);
-        // Real-time will handle the update.
     };
     updateDeleteButton();
 }
@@ -655,7 +649,7 @@ function initDashboardDnD() {
         const idMap = new Map(orderedIds.map((id, index) => [id, index]));
         state.jobs.sort((a, b) => (idMap.get(a.id) ?? Infinity) - (idMap.get(b.id) ?? Infinity));
         await saveJobOrder();
-        renderDashboard(); // Re-render immediately for visual feedback
+        renderDashboard();
     });
     function getDragAfterElement(container, y) {
         const draggableElements = [...container.querySelectorAll('tr:not(.dragging)')];
@@ -667,14 +661,11 @@ function initDashboardDnD() {
 }
 
 
-// ... (The rest of your functions like calcPlanFor, markStart, markEnd, etc. remain largely the same, but they now call `saveJob` instead of `save`) ...
-// I will include the necessary changes in the functions that modify data.
 async function updateJobData(jobId, updateFn) {
     const job = state.jobs.find(j => j.id === jobId);
     if (!job) return;
     updateFn(job);
     await saveJob(job);
-    // Let real-time handle the re-render or call render functions manually if needed.
     renderDepartments();
     renderDashboard();
 }
@@ -696,7 +687,7 @@ function manualSetTime(jobId, dept, proc, type, timeValue) {
             }
             const [hours, minutes] = timeValue.split(':').map(Number);
             const date = new Date(job.date);
-            date.setUTCHours(hours, minutes, 0, 0); // Use UTC to avoid timezone issues
+            date.setUTCHours(hours, minutes, 0, 0);
             t[type] = date.toISOString();
         }
     });
@@ -728,10 +719,6 @@ function completeAllAsPlanned(jobId, dept) {
     });
 }
 
-
-// ... (All other calculation and rendering functions from your file go here)
-// ... I'll paste the full set of remaining functions for completeness.
-
 function calcPlanFor(dept, job){
   const q = job.qty[dept]||0; if(!q) return 0;
   let totalSec = (state.settings.prepPerJob?.[dept]||0) * 60;
@@ -762,15 +749,12 @@ function adjustForBreaks(startSec, durationSec, breakPeriodsSec) {
     let totalBreakDuration = 0;
 
     breakPeriodsSec.forEach(b => {
-        // If the task starts during a break, move it to the end of the break.
         if (currentStart >= b.start && currentStart < b.end) {
             currentStart = b.end;
         }
         
-        // Recalculate end time after potentially moving the start time.
         endSec = currentStart + durationSec + totalBreakDuration;
 
-        // If the task now spans a break, add the break duration.
         if (currentStart < b.start && endSec > b.start) {
             totalBreakDuration += (b.end - b.start);
         }
@@ -1181,7 +1165,6 @@ function refreshDepFilter(){
 
     deptsToShow.forEach(d=> sel.appendChild(cel('option',{value:d,text:d})));
     
-    // Set selected value, if still valid
     if ([...sel.options].some(o => o.value === currentVal)) {
         sel.value = currentVal;
     } else {
@@ -1190,7 +1173,7 @@ function refreshDepFilter(){
 }
 
 function renderAll(){
-  if (!state.settings || Object.keys(state.settings).length === 0) return; // Don't render if settings not loaded
+  if (!state.settings || Object.keys(state.settings).length === 0) return;
   const keepSel = el('#deptSel')?.value || currentDeptSel;
   ensureDeptBaseline();
   renderQtyGrid();
@@ -1206,9 +1189,6 @@ function renderAll(){
   setActive(currentView);
 }
 
-
-// ... (All other functions for XLSX export/import remain the same, just remove any calls to `save()`)
-// Note: The import/export functions will be added back here for completeness.
 
 function getActualTimesForDept(job, dept) {
     const tracks = job.tracks[dept] || {};
@@ -1284,7 +1264,7 @@ async function importJobsXLSX(file) {
             });
 
             if (newJobs.length > 0) {
-                 const { error } = await supabase.from('jobs').insert(newJobs);
+                 const { error } = await supabaseClient.from('jobs').insert(newJobs);
                  if (error) throw error;
             }
             
@@ -1315,11 +1295,10 @@ const today = new Date().toISOString().slice(0,10);
 // ==================== APPLICATION INITIALIZATION =================
 // =================================================================
 
-// Main function to start the application
 async function initializeApp() {
-    supabase.auth.onAuthStateChange(async (event, session) => {
-        if (event === 'SIGNED_IN') {
-            const { data, error } = await supabase
+    supabaseClient.auth.onAuthStateChange(async (event, session) => {
+        if (event === 'SIGNED_IN' && session) {
+            const { data, error } = await supabaseClient
                 .from('profiles')
                 .select(`role, full_name, assigned_departments`)
                 .eq('id', session.user.id)
@@ -1335,7 +1314,7 @@ async function initializeApp() {
                 await loadInitialData();
                 subscribeToChanges();
             }
-        } else if (event === 'SIGNED_OUT') {
+        } else if (event === 'SIGNED_OUT' || !session) {
             userProfile = null;
             state = { settings: {}, jobs: [] };
             el('#loginView').style.display = 'flex';
@@ -1343,13 +1322,19 @@ async function initializeApp() {
             unsubscribeFromChanges();
         }
     });
+
+    // Check initial state
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (!session) {
+        el('#loginView').style.display = 'flex';
+        el('#mainApp').style.display = 'none';
+    }
 }
 
-// Event Listeners for Login/Logout
 el('#btnLogin').addEventListener('click', async () => {
     const email = el('#loginEmail').value;
     const password = el('#loginPassword').value;
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
     if (error) {
         el('#loginError').textContent = 'อีเมลหรือรหัสผ่านไม่ถูกต้อง';
     } else {
@@ -1360,10 +1345,9 @@ el('#btnLogin').addEventListener('click', async () => {
 });
 
 el('#btnLogout').addEventListener('click', async () => {
-    await supabase.auth.signOut();
+    await supabaseClient.auth.signOut();
 });
 
-// Start the application
 initializeApp();
 
 </script>
