@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>แผนผลิต – Production Planner (Supabase v4.2.8)</title>
+  <title>แผนผลิต – Production Planner (Supabase v4.2.9)</title>
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600;700&display=swap" rel="stylesheet"/>
   <!-- Library สำหรับสร้างไฟล์ XLSX -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -101,7 +101,7 @@
     <div class="bar">
       <div style="display:flex;align-items:center;gap:10px">
         <h1>แผนผลิต (Production Planner)</h1>
-        <span class="badge">เวอร์ชัน: 4.2.8 • Supabase DB</span>
+        <span class="badge">เวอร์ชัน: 4.2.9 • Supabase DB</span>
       </div>
       <div class="nav-group">
         <button class="btn" id="btnDashboard">Dashboard (Master Plan)</button>
@@ -364,7 +364,7 @@ const el = sel=>document.querySelector(sel);
 const cel = (tag,attrs={})=>{const n=document.createElement(tag);for(const k in attrs){if(k==='text')n.textContent=attrs[k];else if(k==='html')n.innerHTML=attrs[k];else n.setAttribute(k,attrs[k]);}return n}
 const pad = n=> String(Math.floor(n)).padStart(2,'0');
 const fmtTime = secs=>{ const h=Math.floor(secs/3600), m=Math.floor((secs%3600)/60); return `${h} ชม ${m} นาที`; };
-const parseTimeToMin = t=>{ if(!t) return NaN; const [H,M]=t.split(':').map(Number); if(Number.isNaN(H)||Number.isNaN(M)) return NaN; return H*60+M; };
+const parseTimeToMin = t=>{ if(!t) return NaN; const parts = t.split(':'); if (parts.length < 2) return NaN; const [H,M]=parts.map(Number); if(Number.isNaN(H)||Number.isNaN(M)) return NaN; return H*60+M; };
 const minToHHMM = m => { const totalMinutes = Math.round(m); const hours = Math.floor(totalMinutes / 60); const minutes = totalMinutes % 60; return `${pad(hours)}:${pad(minutes)}`; };
 const secToHHMM = s => minToHHMM(s/60);
 const nowISO = ()=> new Date().toISOString();
@@ -404,7 +404,9 @@ function renderQtyGrid(){
 function fillForm(job){
   el('#f_date').value = job.date;
   el('#f_name').value = job.name;
-  el('#f_cut').value = job.cut || '';
+  let cutTime = job.cut || '';
+  if (cutTime && cutTime.length > 5) cutTime = cutTime.substring(0, 5);
+  el('#f_cut').value = cutTime;
   state.settings.departments.forEach(d=>{ const n=el('#q_'+d); if(n) n.value = job.qty?.[d] ?? 0; });
 }
 function clearForm(){ editingJobId=null; el('#btnAddJob').style.display=''; el('#btnSaveJob').style.display='none'; el('#btnCancelEdit').style.display='none'; el('#f_name').value=''; el('#f_cut').value=''; el('#f_date').value=new Date().toISOString().slice(0,10); state.settings.departments.forEach(d=>{ const n=el('#q_'+d); if(n) n.value=0; }); }
@@ -510,9 +512,11 @@ function renderJobs(){
                 if (q > 0) qtyContainer.appendChild(cel('span', { class: 'pill', text: `${d}: ${q}` }));
             });
             qtyCell.appendChild(qtyContainer);
+            let cutTimeText = j.cut || '-';
+            if (cutTimeText.length > 5) cutTimeText = cutTimeText.substring(0, 5);
             const nameCell = cel('td', { text: j.name });
             const dateCell = cel('td', { text: j.date });
-            const cutCell = cel('td', { text: j.cut || '-' });
+            const cutCell = cel('td', { text: cutTimeText });
             tr.append(nameCell, dateCell, cutCell, qtyCell);
             const tdAct = cel('td');
             tr.appendChild(tdAct);
@@ -600,7 +604,6 @@ function initDashboardDnD() {
     tableBody.addEventListener('dragend', () => {
         if (draggedRow) draggedRow.classList.remove('dragging');
         draggedRow = null;
-        // Set isDragging to false slightly later to avoid race condition with drop
         setTimeout(() => { isDragging = false; }, 100);
     });
 
@@ -648,18 +651,17 @@ function initDashboardDnD() {
 
         el('#db_status').textContent = 'Saving new order...';
         
-        // This is the alternative: multiple updates instead of one upsert
         const promises = updates.map(u => 
             supabaseClient.from('jobs').update({ order_index: u.order_index }).eq('id', u.id)
         );
 
         const results = await Promise.all(promises);
         const firstError = results.find(res => res.error);
-
+        
         isDragging = false;
 
         if (firstError) {
-            console.error("Failed to save order", firstError.error);
+            console.error("Failed to save order:", firstError.error);
             alert("ไม่สามารถบันทึกลำดับใหม่ได้");
             el('#db_status').textContent = 'Order save failed!';
             state = await load();
@@ -901,8 +903,10 @@ function renderDepartments(){
       const planSec = calcPlanFor(dept,j);
       const startLabel = jtl ? secToHHMM(jtl.start) : '-';
       const endLabel = jtl ? secToHHMM(jtl.end) : '-';
+      let cutTimeText = j.cut || '-';
+      if (cutTimeText.length > 5) cutTimeText = cutTimeText.substring(0, 5);
       const jobCard = cel('div',{class:'job', 'data-id': j.id});
-      jobCard.innerHTML = `<div class="jobhead"><div style="flex:1"><div class="title">${j.name}</div><small><b>Cut:</b> ${j.cut||'-'} &nbsp;&nbsp;•&nbsp;&nbsp; <b>Line:</b> ${lineIndex + 1}</small></div><button class="btn mini gray toggle">รายละเอียด</button></div><div style="padding-top:8px;"><div><b>Plan: ${startLabel}-${endLabel}</b> (${Math.round(planSec/60)} min) <b>Qty:</b> ${j.qty[dept]}</div><div class="job-status-container" style="display: flex; align-items: center; gap: 6px; margin-top: 4px;"><span>สถานะ:</span> <span class="status-badge">รอดำเนินการ</span></div><div style="display:flex; gap:6px; margin-top:8px;"><button class="btn mini gray btn-complete-plan">เสร็จสิ้นตาม Plan</button></div></div>`;
+      jobCard.innerHTML = `<div class="jobhead"><div style="flex:1"><div class="title">${j.name}</div><small><b>Cut:</b> ${cutTimeText} &nbsp;&nbsp;•&nbsp;&nbsp; <b>Line:</b> ${lineIndex + 1}</small></div><button class="btn mini gray toggle">รายละเอียด</button></div><div style="padding-top:8px;"><div><b>Plan: ${startLabel}-${endLabel}</b> (${Math.round(planSec/60)} min) <b>Qty:</b> ${j.qty[dept]}</div><div class="job-status-container" style="display: flex; align-items: center; gap: 6px; margin-top: 4px;"><span>สถานะ:</span> <span class="status-badge">รอดำเนินการ</span></div><div style="display:flex; gap:6px; margin-top:8px;"><button class="btn mini gray btn-complete-plan">เสร็จสิ้นตาม Plan</button></div></div>`;
       const procWrap = cel('div',{class: 'procwrap hidden' });
       const procOffsets = calcProcPlanOffsets(dept, j);
       
@@ -992,7 +996,9 @@ function renderDashboard(){
   dayJobs.forEach(j=>{
     const tr = cel('tr', { 'data-id': j.id });
     tr.draggable = unlocked;
-    tr.innerHTML = `<td class="drag-handle">${unlocked ? '☰' : ''}</td><td>${j.name}</td><td class="cut-time-divider">${j.cut || '-'}</td>`;
+    let cutTimeText = j.cut || '-';
+    if (cutTimeText.length > 5) cutTimeText = cutTimeText.substring(0, 5);
+    tr.innerHTML = `<td class="drag-handle">${unlocked ? '☰' : ''}</td><td>${j.name}</td><td class="cut-time-divider">${cutTimeText}</td>`;
     state.settings.departments.forEach(d=>{
       const tdStatus = cel('td', {class:'dept-divider'});
       const tdStart = cel('td');
@@ -1500,7 +1506,9 @@ el('#btnDownloadXLSX').onclick = () => {
             const me = timelines[dept].find(x => x.id === job.id);
             const { actualStart, actualEnd } = getActualTimesForDept(job, dept);
             const assignedLine = (job.line_assignments[dept] || 0) + 1;
-            const row = [index + 1, job.name, job.cut || '-', job.qty[dept], `Line ${assignedLine}`, statusInfo.text, me ? secToHHMM(me.start) : '-', me ? secToHHMM(me.end) : '-', actualStart, actualEnd];
+            let cutTimeText = job.cut || '-';
+            if (cutTimeText.length > 5) cutTimeText = cutTimeText.substring(0, 5);
+            const row = [index + 1, job.name, cutTimeText, job.qty[dept], `Line ${assignedLine}`, statusInfo.text, me ? secToHHMM(me.start) : '-', me ? secToHHMM(me.end) : '-', actualStart, actualEnd];
             deptData.push(row);
         });
         const ws = XLSX.utils.aoa_to_sheet(deptData);
