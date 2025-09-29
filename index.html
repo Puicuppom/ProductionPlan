@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>แผนผลิต – Production Planner (Supabase v4.2.5)</title>
+  <title>แผนผลิต – Production Planner (Supabase v4.2.8)</title>
   <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600;700&display=swap" rel="stylesheet"/>
   <!-- Library สำหรับสร้างไฟล์ XLSX -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -101,7 +101,7 @@
     <div class="bar">
       <div style="display:flex;align-items:center;gap:10px">
         <h1>แผนผลิต (Production Planner)</h1>
-        <span class="badge">เวอร์ชัน: 4.2.5 • Supabase DB</span>
+        <span class="badge">เวอร์ชัน: 4.2.8 • Supabase DB</span>
       </div>
       <div class="nav-group">
         <button class="btn" id="btnDashboard">Dashboard (Master Plan)</button>
@@ -188,7 +188,7 @@
       <div class="inner">
         <div class="toolbar">
           <div><label>เลือกวัน</label><input type="date" id="d_date"></div>
-          <button class="btn gray right" id="btnDownloadXLSX">Download Excel (.xlsx)</button>
+          <button class="btn gray right" id="btnDownloadXLSX">Download Excel (แยกแผนก)</button>
         </div>
         <div class="help" style="margin:6px 0 12px;">* เวลาแผนจะอัปเดตตาม "เวลาเสร็จจริง" ของงานก่อนหน้า และข้าม "เวลาพัก" ของแต่ละแผนกโดยอัตโนมัติ</div>
         <div id="kpiBar" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;"></div>
@@ -279,6 +279,7 @@ let currentDeptSel = null;
 let editingJobId = null;
 let currentView = 'dash';
 let unlocked = false;
+let isDragging = false; // Flag to control realtime updates during drag
 
 const ui = { expand: {} };
 function isExpanded(dept, jobId){ return !!(ui.expand[dept] && ui.expand[dept][jobId]); }
@@ -425,8 +426,9 @@ async function addJob(){
     const date = el('#f_date').value; const name = el('#f_name').value.trim(); const cut = el('#f_cut').value;
     if(!date||!name){ alert('กรอก วันที่ และ ชื่อใบงาน'); return; }
     const qty = {}; state.settings.departments.forEach(d=> qty[d] = Number(el('#q_'+d)?.value || 0));
+    const maxOrderIndex = state.jobs.length > 0 ? Math.max(...state.jobs.map(j => j.order_index)) : -1;
     const newJob = createJobObject({date, name, cut, qty});
-    newJob.order_index = state.jobs.length;
+    newJob.order_index = maxOrderIndex + 1;
     el('#btnAddJob').disabled = true;
     el('#db_status').textContent = 'Adding job...';
     const { error } = await supabaseClient.from('jobs').insert([newJob]);
@@ -497,7 +499,7 @@ function renderJobs(){
     state.jobs
         .filter(j=> !qDate || sameDay(j.date,qDate))
         .filter(j=> !qStr || j.name.toLowerCase().includes(qStr))
-        .sort((a,b)=> (b.date.localeCompare(a.date)) || a.name.localeCompare(b.name))
+        .sort((a,b)=> (b.date.localeCompare(a.date)) || (a.order_index - b.order_index))
         .forEach(j=>{
             const tr=document.createElement('tr');
             tr.innerHTML = `<td class="checkbox-cell"><input type="checkbox" class="job-checkbox" data-id="${j.id}" ${!unlocked ? 'disabled' : ''}></td>`;
@@ -581,34 +583,92 @@ function setupMultiSelectListeners() {
     updateDeleteButton();
 }
 
+// --- CORRECTED DRAG AND DROP LOGIC ---
 function initDashboardDnD() {
     const tableBody = el('#tableDash tbody');
     let draggedRow = null;
+
     tableBody.addEventListener('dragstart', e => {
         if (!unlocked) return;
         const target = e.target.closest('tr');
         if (!target.draggable) return;
         draggedRow = target;
+        isDragging = true;
         setTimeout(() => draggedRow.classList.add('dragging'), 0);
     });
-    tableBody.addEventListener('dragend', () => { if (!draggedRow) return; draggedRow.classList.remove('dragging'); draggedRow = null; });
-    tableBody.addEventListener('dragover', e => { e.preventDefault(); if (!unlocked) return; const afterElement = getDragAfterElement(tableBody, e.clientY); tableBody.insertBefore(draggedRow, afterElement); });
+
+    tableBody.addEventListener('dragend', () => {
+        if (draggedRow) draggedRow.classList.remove('dragging');
+        draggedRow = null;
+        // Set isDragging to false slightly later to avoid race condition with drop
+        setTimeout(() => { isDragging = false; }, 100);
+    });
+
+    tableBody.addEventListener('dragover', e => {
+        e.preventDefault();
+        if (!unlocked || !draggedRow) return;
+        const afterElement = getDragAfterElement(tableBody, e.clientY);
+        tableBody.insertBefore(draggedRow, afterElement);
+    });
+    
     tableBody.addEventListener('drop', async e => {
-        e.preventDefault(); if (!draggedRow || !unlocked) return;
-        const orderedIds = [...tableBody.querySelectorAll('tr')].map(row => row.dataset.id);
-        const idMap = new Map(orderedIds.map((id, index) => [id, index]));
-        state.jobs.sort((a, b) => (idMap.get(a.id) ?? Infinity) - (idMap.get(b.id) ?? Infinity));
-        const updates = state.jobs.map((job, index) => ({ id: job.id, order_index: index }));
+        e.preventDefault();
+        if (!draggedRow || !unlocked) {
+            isDragging = false;
+            return;
+        }
+
+        const date = el('#d_date').value;
+        const orderedIdsOnScreen = [...tableBody.querySelectorAll('tr')].map(row => row.dataset.id);
+        const originalJobsForDate = state.jobs
+            .filter(j => sameDay(j.date, date))
+            .sort((a, b) => a.order_index - b.order_index);
+
+        if (orderedIdsOnScreen.length !== originalJobsForDate.length) {
+            console.error("Mismatch between DOM and state. Aborting drop.");
+            isDragging = false;
+            renderDashboard();
+            return;
+        }
+
+        const originalIndices = originalJobsForDate.map(j => j.order_index);
+        
+        const updates = orderedIdsOnScreen.map((jobId, i) => ({
+            id: jobId,
+            order_index: originalIndices[i]
+        }));
+        
+        const updateMap = new Map(updates.map(u => [u.id, u.order_index]));
+        state.jobs.forEach(job => {
+            if (updateMap.has(job.id)) {
+                job.order_index = updateMap.get(job.id);
+            }
+        });
+        renderDashboard();
+
         el('#db_status').textContent = 'Saving new order...';
-        const { error } = await supabaseClient.from('jobs').upsert(updates);
-        if (error) {
-            console.error("Failed to save order", error);
-            alert("ไม่สามารถบันทึกลำดับใหม่ได้"); el('#db_status').textContent = 'Order save failed!';
+        
+        // This is the alternative: multiple updates instead of one upsert
+        const promises = updates.map(u => 
+            supabaseClient.from('jobs').update({ order_index: u.order_index }).eq('id', u.id)
+        );
+
+        const results = await Promise.all(promises);
+        const firstError = results.find(res => res.error);
+
+        isDragging = false;
+
+        if (firstError) {
+            console.error("Failed to save order", firstError.error);
+            alert("ไม่สามารถบันทึกลำดับใหม่ได้");
+            el('#db_status').textContent = 'Order save failed!';
+            state = await load();
+            renderAll();
         } else {
             el('#db_status').textContent = 'Database Synced';
         }
-        renderAll();
     });
+
     function getDragAfterElement(container, y) {
         const draggableElements = [...container.querySelectorAll('tr:not(.dragging)')];
         return draggableElements.reduce((closest, child) => {
@@ -617,6 +677,7 @@ function initDashboardDnD() {
         }, { offset: Number.NEGATIVE_INFINITY }).element;
     }
 }
+
 
 // --- CALCULATION AND LOGIC FUNCTIONS ---
 function calcPlanFor(dept, job){
@@ -681,7 +742,6 @@ function manualSetTime(jobId, dept, proc, type, timeValue) {
     renderDashboard();
 }
 
-// REVISED: completeAllAsPlanned with rounding to nearest minute for consistency
 function completeAllAsPlanned(jobId, dept) {
     if (!confirm('ยืนยันการเสร็จสิ้นทุกขั้นตอนตามเวลาแผน? การกระทำนี้จะเขียนทับเวลาที่บันทึกไว้')) return;
     const job = state.jobs.find(j => j.id === jobId);
@@ -693,25 +753,17 @@ function completeAllAsPlanned(jobId, dept) {
     const jobPlanStartSec = jobTimeline.start;
     const procOffsets = calcProcPlanOffsets(dept, job);
 
-    // --- START OF MODIFICATION ---
-    // This helper function now rounds the total seconds to the nearest minute
-    // before creating the ISO string. This solves the rounding discrepancy.
     const toISO = (totalSeconds) => {
         const d = new Date(job.date);
         d.setHours(0, 0, 0, 0);
-        const roundedSeconds = Math.round(totalSeconds / 60) * 60; // Round to nearest minute
+        const roundedSeconds = Math.round(totalSeconds / 60) * 60;
         d.setSeconds(roundedSeconds);
         return d.toISOString();
     };
-    // --- END OF MODIFICATION ---
 
     procOffsets.forEach(offset => {
-        if (!job.tracks[dept]) {
-            job.tracks[dept] = {};
-        }
-        if (!job.tracks[dept][offset.name]) {
-            job.tracks[dept][offset.name] = { start: null, end: null };
-        }
+        if (!job.tracks[dept]) job.tracks[dept] = {};
+        if (!job.tracks[dept][offset.name]) job.tracks[dept][offset.name] = { start: null, end: null };
         job.tracks[dept][offset.name].start = toISO(jobPlanStartSec + offset.startOff);
         job.tracks[dept][offset.name].end = toISO(jobPlanStartSec + offset.endOff);
     });
@@ -758,22 +810,29 @@ function computePlanTimeline(dept, date, anchor = 'cut', opts = {}) {
     const lines = Math.max(1, state.settings.linesPerDept?.[dept] || 1);
     const dayStartSec = parseTimeToMin(state.settings.dayStart) * 60;
     const breakPeriodsSec = (state.settings.deptBreaks[dept] || []).map(b => ({ start: parseTimeToMin(b.start) * 60, end: parseTimeToMin(b.end) * 60 })).sort((a,b) => a.start - b.start);
-    const jobsOnDate = state.jobs.filter(j => sameDay(j.date, date) && (j.qty[dept] || 0) > 0);
+    const jobsOnDate = state.jobs
+        .filter(j => sameDay(j.date, date) && (j.qty[dept] || 0) > 0)
+        .sort((a, b) => a.order_index - b.order_index);
+
     const results = [];
     const lineLastEnd = new Array(lines).fill(dayStartSec);
+
     jobsOnDate.forEach(j => {
         const li = j.line_assignments[dept] || 0;
         let prevEnd = lineLastEnd[li];
         const prevJobsOnLine = results.filter(r => r.line === li);
+
         if (prevJobsOnLine.length > 0) {
             const lastJobOnLineResult = prevJobsOnLine[prevJobsOnLine.length - 1];
             const lastJobOnLine = state.jobs.find(jb => jb.id === lastJobOnLineResult.id);
             const actualLastEnd = getLatestActualEndSecForDept(lastJobOnLine, dept);
             prevEnd = actualLastEnd > 0 ? actualLastEnd : lastJobOnLineResult.end;
         }
+
         const dur = calcPlanFor(dept, j);
         const cutSec = j.cut ? parseTimeToMin(j.cut) * 60 : -Infinity;
         let base = Math.max(prevEnd, cutSec);
+
         if(dept==='PACK' && !opts._internalNoPackGate){
             let latestOtherEnd = 0;
             state.settings.departments.filter(d => d !== 'PACK' && (j.qty[d]||0) > 0).forEach(od => {
@@ -782,6 +841,7 @@ function computePlanTimeline(dept, date, anchor = 'cut', opts = {}) {
             });
             base = Math.max(base, latestOtherEnd);
         }
+        
         const { start, end } = adjustForBreaks(base, dur, breakPeriodsSec);
         results.push({ id: j.id, start, end, dur, line: li });
         lineLastEnd[li] = end;
@@ -820,7 +880,10 @@ function renderDepartments(){
   box.append(title, inner);
   const board = cel('div', { class: 'dept-board' });
   inner.appendChild(board);
-  const jobsOnDate = state.jobs.filter(j=> sameDay(j.date, selDate) && (j.qty[dept]||0)>0 );
+  const jobsOnDate = state.jobs
+    .filter(j=> sameDay(j.date, selDate) && (j.qty[dept]||0)>0 )
+    .sort((a,b) => a.order_index - b.order_index);
+
   const timeline = computePlanTimeline(dept, selDate, 'cut');
   const lines = Math.max(1, state.settings.linesPerDept?.[dept]||1);
   const lineContainers = Array.from({length: lines}, (_, i) => {
@@ -916,7 +979,7 @@ function renderDashboard(){
   headerHTML += '</tr>';
   thead.innerHTML = headerHTML;
   tbody.innerHTML = '';
-  const dayJobs = state.jobs.filter(j=> sameDay(j.date,date));
+  const dayJobs = state.jobs.filter(j=> sameDay(j.date,date)).sort((a, b) => a.order_index - b.order_index);
   el('#kpiBar').innerHTML = state.settings.departments.map(d => {
       const tl = computePlanTimeline(d, date, 'cut');
       const totalSec = tl.reduce((sum, item) => sum + item.dur, 0);
@@ -1028,6 +1091,7 @@ function ensureDeptBaseline(s=state){
       if(s.settings.linesPerDept[d]==null) s.settings.linesPerDept[d]=1;
   });
   s.jobs.forEach(j=>{
+    if (j.order_index == null) j.order_index = 0;
     j.line_assignments = j.line_assignments || {};
     s.settings.departments.forEach(d=>{ if(!(d in (j.qty||{}))) j.qty[d]=0; });
   });
@@ -1061,7 +1125,7 @@ function renderDeptManager(){
     host.appendChild(row);
   });
 }
-el('#btnAddDept').onclick= async ()=>{ if(!unlocked) return alert('ปลดล็อกก่อน'); const name=prompt('ชื่อแผนกใหม่'); if(!name) return; state.settings.departments.push(name.trim()); await saveSettings(state.settings); renderAll(); };
+el('#btnAddDept').onclick= async ()=>{ if(!unlocked) return alert('ปลดล็อกก่อน'); const name=prompt('ชื่อแผนกใหม่'); if(!name) return; state.settings.departments.push(name.trim()); ensureDeptBaseline(); await saveSettings(state.settings); renderAll(); };
 
 function renderProcessPane(){
   const sel = el('#deptSel'); sel.innerHTML='';
@@ -1272,15 +1336,193 @@ function renderAll(){
 }
 
 // --- IMPORT / EXPORT FUNCTIONS ---
-function exportSettingsXLSX() { /* ... unchanged ... */ }
-async function importSettingsXLSX(file) { /* ... unchanged ... */ }
+function exportSettingsXLSX() {
+    if (!unlocked) { alert('กรุณาปลดล็อกระบบก่อนทำการ Export Settings.'); return; }
+    const settings = JSON.parse(JSON.stringify(state.settings));
+    const wb = XLSX.utils.book_new();
+    const ws1_data = [["Setting", "Value"],["Day Start", settings.dayStart],["Day End", settings.dayEnd]];
+    const ws1 = XLSX.utils.aoa_to_sheet(ws1_data);
+    XLSX.utils.book_append_sheet(wb, ws1, "General Settings");
+    const ws2_data = [["Order", "Department Name"]];
+    settings.departments.forEach((d, i) => { ws2_data.push([i + 1, d]); });
+    const ws2 = XLSX.utils.aoa_to_sheet(ws2_data);
+    XLSX.utils.book_append_sheet(wb, ws2, "Departments");
+    const ws3_data = [["Department", "Process Name", "Process Type", "Value", "Unit"]];
+    settings.departments.forEach(d => {
+        if (settings.processes[d]) {
+            settings.processes[d].forEach(p => {
+                const isFixed = p.type === 'fixed';
+                const value = isFixed ? (p.value / 60) : p.value;
+                const unit = isFixed ? 'minutes' : 'seconds/piece';
+                ws3_data.push([d, p.name, p.type, value, unit]);
+            });
+        }
+    });
+    const ws3 = XLSX.utils.aoa_to_sheet(ws3_data);
+    XLSX.utils.book_append_sheet(wb, ws3, "Processes");
+    const ws4_data = [["Department", "Prep Time (minutes)"]];
+    settings.departments.forEach(d => { ws4_data.push([d, settings.prepPerJob[d] || 0]); });
+    const ws4 = XLSX.utils.aoa_to_sheet(ws4_data);
+    XLSX.utils.book_append_sheet(wb, ws4, "Prep Time");
+    const ws5_data = [["Department", "Break Start", "Break End"]];
+    settings.departments.forEach(d => {
+        if (settings.deptBreaks[d]) {
+            settings.deptBreaks[d].forEach(b => { ws5_data.push([d, b.start, b.end]); });
+        }
+    });
+    const ws5 = XLSX.utils.aoa_to_sheet(ws5_data);
+    XLSX.utils.book_append_sheet(wb, ws5, "Department Breaks");
+    const ws6_data = [["Department", "Number of Production Lines"]];
+    settings.departments.forEach(d => { ws6_data.push([d, settings.linesPerDept[d] || 1]); });
+    const ws6 = XLSX.utils.aoa_to_sheet(ws6_data);
+    XLSX.utils.book_append_sheet(wb, ws6, "Production Lines");
+    XLSX.writeFile(wb, `Production_Settings_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+async function importSettingsXLSX(file) {
+    if (!unlocked) { alert('กรุณาปลดล็อกระบบก่อนทำการ Import Settings.'); return; }
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+        try {
+            const data = new Uint8Array(event.target.result);
+            const workbook = XLSX.read(data, { type: 'array' });
+            let newSettings = JSON.parse(JSON.stringify(defaultModel().settings));
+            if (workbook.SheetNames.includes("General Settings")) {
+                const ws = workbook.Sheets["General Settings"];
+                const json = XLSX.utils.sheet_to_json(ws, { header: 1 });
+                json.forEach(row => {
+                    if (row[0] === "Day Start") newSettings.dayStart = row[1];
+                    if (row[0] === "Day End") newSettings.dayEnd = row[1];
+                });
+            }
+            if (workbook.SheetNames.includes("Departments")) {
+                const ws = workbook.Sheets["Departments"];
+                const json = XLSX.utils.sheet_to_json(ws);
+                newSettings.departments = json.sort((a, b) => a.Order - b.Order).map(row => row["Department Name"]).filter(Boolean);
+            }
+            newSettings.processes = {};
+            if (workbook.SheetNames.includes("Processes")) {
+                const ws = workbook.Sheets["Processes"];
+                const json = XLSX.utils.sheet_to_json(ws);
+                json.forEach(row => {
+                    const deptName = row["Department"];
+                    if (deptName && newSettings.departments.includes(deptName)) {
+                        if (!newSettings.processes[deptName]) newSettings.processes[deptName] = [];
+                        const isFixed = row["Process Type"] === 'fixed';
+                        const value = Number(row["Value"]) || 0;
+                        newSettings.processes[deptName].push({ name: row["Process Name"], type: row["Process Type"] || 'per_piece', value: isFixed ? (value * 60) : value });
+                    }
+                });
+            }
+            newSettings.prepPerJob = {};
+            if (workbook.SheetNames.includes("Prep Time")) {
+                const ws = workbook.Sheets["Prep Time"];
+                const json = XLSX.utils.sheet_to_json(ws);
+                json.forEach(row => {
+                    const deptName = row["Department"];
+                    if (deptName && newSettings.departments.includes(deptName)) newSettings.prepPerJob[deptName] = Number(row["Prep Time (minutes)"]) || 0;
+                });
+            }
+            newSettings.deptBreaks = {};
+            if (workbook.SheetNames.includes("Department Breaks")) {
+                const ws = workbook.Sheets["Department Breaks"];
+                const json = XLSX.utils.sheet_to_json(ws);
+                json.forEach(row => {
+                    const deptName = row["Department"];
+                    if (deptName && newSettings.departments.includes(deptName)) {
+                        if (!newSettings.deptBreaks[deptName]) newSettings.deptBreaks[deptName] = [];
+                        newSettings.deptBreaks[deptName].push({ start: row["Break Start"], end: row["Break End"] });
+                    }
+                });
+            }
+            newSettings.linesPerDept = {};
+            if (workbook.SheetNames.includes("Production Lines")) {
+                const ws = workbook.Sheets["Production Lines"];
+                const json = XLSX.utils.sheet_to_json(ws);
+                json.forEach(row => {
+                    const deptName = row["Department"];
+                    if (deptName && newSettings.departments.includes(deptName)) newSettings.linesPerDept[deptName] = Number(row["Number of Production Lines"]) || 1;
+                });
+            }
+            await saveSettings(newSettings);
+            state.settings = newSettings;
+            alert('นำเข้าการตั้งค่าสำเร็จแล้ว!');
+            renderAll();
+        } catch (err) {
+            alert(`เกิดข้อผิดพลาดในการนำเข้าไฟล์การตั้งค่า: ${err.message}`);
+        } finally {
+            el('#fileImportSettingsXLSX').value = '';
+        }
+    };
+    reader.readAsArrayBuffer(file);
+}
+
 el('#btnExportSettingsXLSX').onclick = exportSettingsXLSX;
-el('#fileImportSettingsXLSX').addEventListener('change', (e) => { /* ... unchanged ... */ });
-function getActualTimesForDept(job, dept) { /* ... unchanged ... */ }
-el('#btnDownloadXLSX').onclick = () => { /* ... unchanged ... */ };
-el('#btnDownloadTemplateXLSX').onclick = () => { /* ... unchanged ... */ };
+el('#fileImportSettingsXLSX').addEventListener('change', (e) => {
+    if (e.target.files[0]) importSettingsXLSX(e.target.files[0]);
+});
+
+function getActualTimesForDept(job, dept) {
+    const tracks = job.tracks?.[dept] || {};
+    const procNames = ['เตรียมไฟล์', ...(state.settings.processes[dept] || []).map(p => p.name)];
+    let firstStart = null;
+    let lastEnd = null;
+    for (const procName of procNames) {
+        const track = tracks[procName];
+        if (track?.start) {
+            const currentStart = new Date(track.start);
+            if (!firstStart || currentStart < firstStart) firstStart = currentStart;
+        }
+        if (track?.end) {
+            const currentEnd = new Date(track.end);
+            if (!lastEnd || currentEnd > lastEnd) lastEnd = currentEnd;
+        }
+    }
+    return {
+        actualStart: firstStart ? fmtLocalHHMM(firstStart.toISOString()) : '-',
+        actualEnd: lastEnd ? fmtLocalHHMM(lastEnd.toISOString()) : '-'
+    };
+}
+
+el('#btnDownloadXLSX').onclick = () => {
+    if (!unlocked) { alert('กรุณาปลดล็อกระบบก่อนทำการ Download Excel.'); return; }
+    const date = el('#d_date').value || new Date().toISOString().slice(0, 10);
+    const dayJobs = state.jobs.filter(j => sameDay(j.date, date)).sort((a,b) => a.order_index - b.order_index);
+    const wb = XLSX.utils.book_new();
+    const timelines = {};
+    state.settings.departments.forEach(d => { timelines[d] = computePlanTimeline(d, date, 'cut'); });
+    state.settings.departments.forEach(dept => {
+        const deptHeader = ['ลำดับ', 'ชื่อใบงาน', 'เวลาตัด', 'จำนวน', 'ไลน์', 'สถานะ', 'แผนเริ่ม', 'แผนเสร็จ', 'เริ่มจริง', 'เสร็จจริง'];
+        const deptData = [deptHeader];
+        const deptJobs = dayJobs.filter(j => (j.qty[dept] || 0) > 0);
+        deptJobs.forEach((job, index) => {
+            const statusInfo = getJobStatusForDept(job, dept);
+            const me = timelines[dept].find(x => x.id === job.id);
+            const { actualStart, actualEnd } = getActualTimesForDept(job, dept);
+            const assignedLine = (job.line_assignments[dept] || 0) + 1;
+            const row = [index + 1, job.name, job.cut || '-', job.qty[dept], `Line ${assignedLine}`, statusInfo.text, me ? secToHHMM(me.start) : '-', me ? secToHHMM(me.end) : '-', actualStart, actualEnd];
+            deptData.push(row);
+        });
+        const ws = XLSX.utils.aoa_to_sheet(deptData);
+        ws['!cols'] = [{ wch: 5 },{ wch: 25 },{ wch: 10 },{ wch: 8 },{ wch: 8 },{ wch: 20 },{ wch: 10 },{ wch: 10 },{ wch: 10 },{ wch: 10 }];
+        XLSX.utils.book_append_sheet(wb, ws, dept);
+    });
+    XLSX.writeFile(wb, `Master_Plan_By_Dept_${date}.xlsx`);
+};
+
+el('#btnDownloadTemplateXLSX').onclick = () => {
+    if (!unlocked) { alert('กรุณาปลดล็อกระบบก่อนทำการ Download Template.'); return; }
+    const templateHeader = ['date', 'name', 'cut', ...state.settings.departments];
+    const exampleRow = [new Date().toISOString().slice(0, 10), 'ตัวอย่าง-ชื่องาน-01', '09:30', ...state.settings.departments.map((d, i) => i === 0 ? 100 : 0)];
+    const data = [templateHeader, exampleRow];
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Jobs Template");
+    XLSX.writeFile(wb, `Jobs_Import_Template.xlsx`);
+};
 
 async function importJobsXLSX(file) {
+    if (!unlocked) { alert('กรุณาปลดล็อกก่อน'); return; }
     const reader = new FileReader();
     reader.onload = async (event) => {
         let successCount = 0; let failCount = 0; let failedRows = [];
@@ -1292,7 +1534,7 @@ async function importJobsXLSX(file) {
             const json = XLSX.utils.sheet_to_json(worksheet, {raw: false});
             if (!json.length) throw new Error("ไฟล์ Excel ว่างเปล่า");
             const newJobs = [];
-            const existingJobCount = state.jobs.length;
+            const maxOrderIndex = state.jobs.length > 0 ? Math.max(...state.jobs.map(j => j.order_index)) : -1;
             json.forEach((row, index) => {
                 if (!row.name || !row.date) { failCount++; failedRows.push(index + 2); return; }
                 const qty = {};
@@ -1303,7 +1545,7 @@ async function importJobsXLSX(file) {
                     date: jobDate.toISOString().slice(0, 10),
                     name: String(row.name), cut: String(row.cut || ''), qty: qty
                 });
-                job.order_index = existingJobCount + newJobs.length;
+                job.order_index = maxOrderIndex + 1 + newJobs.length;
                 newJobs.push(job);
                 successCount++;
             });
@@ -1329,8 +1571,7 @@ async function importJobsXLSX(file) {
     reader.readAsArrayBuffer(file);
 }
 el('#fileImportJobsXLSX').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (file) importJobsXLSX(file);
+    if (e.target.files[0]) importJobsXLSX(e.target.files[0]);
 });
 
 
@@ -1339,22 +1580,25 @@ const today = new Date().toISOString().slice(0,10);
 
 function setupRealtimeSubscriptions() {
     console.log('Setting up realtime subscriptions...');
+    
     const jobChannel = supabaseClient.channel('public:jobs');
     jobChannel.on('postgres_changes', { event: '*', schema: 'public', table: 'jobs' }, async (payload) => {
+        if (isDragging) {
+            console.log("Realtime update ignored during drag operation.");
+            return;
+        }
         console.log('Realtime job change received!', payload);
         const { data: jobsData, error: jobsError } = await supabaseClient.from('jobs').select('*').order('order_index');
         if (jobsError) { console.error('Realtime fetch error:', jobsError); return; }
         state.jobs = jobsData || [];
-        const currentHandlers = { dash: renderDashboard, dept: renderDepartments, jobs: renderJobs };
-        if (currentHandlers[currentView]) {
-            currentHandlers[currentView]();
-            populateJobDateFilter();
-        }
+        renderAll();
     }).subscribe((status) => {
         if (status === 'SUBSCRIBED') console.log('Successfully subscribed to jobs channel!');
     });
+
     const settingsChannel = supabaseClient.channel('public:settings');
     settingsChannel.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'settings' }, (payload) => {
+        if (isDragging) return;
         console.log('Realtime settings change received!', payload);
         state.settings = payload.new.data;
         migrateSettingsForProcessTypes(state.settings);
